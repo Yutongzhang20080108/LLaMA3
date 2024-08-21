@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
-import tiktoken
+from transformers import GPT2Tokenizer
 import numpy as np
 #---------------------------------------------------------
 
@@ -25,7 +25,7 @@ class LLaMAConfig:
 
 #Part2: Tokenizer
 #We are going to use the tokenizer from Huggingface.
-tokenizer = tiktoken.get_encoding("gpt2")
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
 #Part3: DataLoader
 #Function: 1. get one tokenized batch of data
@@ -136,25 +136,28 @@ class LLaMA3(nn.Module):
             return logits
     
     #The generation is actually not the same as QA but the text completion
-    def generation(self, idx, num_return_sequences=1):
+    def generation(self, idx, num_return_sequences=1, max_tokens=64):
         model.eval()
         tokenized_sentence = torch.tensor(tokenizer.encode(idx))
         num_tokenized_sentence = tokenized_sentence.repeat(num_return_sequences, 1).contiguous()
         num_tokenized_sentence = num_tokenized_sentence.to(device)
         if num_return_sequences == 1:
-            T = num_tokenized_sentence.size(1)
+            T = tokenized_sentence.size(1)
             assert T <= self.config.max_seq_len
-            pos = torch.arange(0, T, dtype=torch.long, device=device)
-            token_emb = self.emb(num_tokenized_sentence)
-            pos_emb = self.pos_emb(pos)
-            emb = token_emb + pos_emb
-            for block in self.Decoder:
-                emb = block(emb)
-            logits = self.ln(emb)
-            logits = logits[:, -1, :]
-            next_tokens_probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(next_tokens_probs, 1)
-            idx = torch.cat([num_tokenized_sentence, next_token], dim=-1)
+            for i in range(max_tokens-T):
+                T = tokenized_sentence.size(1)
+                pos = torch.arange(0, T, dtype=torch.long, device=device)
+                token_emb = self.emb(num_tokenized_sentence)
+                pos_emb = self.pos_emb(pos)
+                emb = token_emb + pos_emb
+                for block in self.Decoder:
+                    emb = block(emb)
+                logits = self.ln(emb)
+                logits = logits[:, -1, :]
+                next_tokens_probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(next_tokens_probs, 1)
+                tokenized_sentence = torch.cat([num_tokenized_sentence, next_token], dim=-1)
+
             generation = tokenizer.decode(idx[0].tolist())
             return generation
         else:
@@ -205,17 +208,17 @@ with open("input.txt", "r") as f:
     data = f.read()
 dataloader = DataLoader(data, LLaMAConfig())
 model = LLaMA3(LLaMAConfig()).to(device)
-#model = torch.compile(model)
+model = torch.compile(model)
 #x, y = dataloader.get_batch()
 #print(x.shape, y.shape)
 #logits, loss = model(x, y)
 #print(logits.shape, loss)
 
-"""#test sampling
+#test sampling
 source_sentence = "Hello world"
 generation = model.generation(source_sentence, 1)
-print(generation)"""
+print(generation)
 
-Pretrainer(model, dataloader, LLaMAConfig())
+#Pretrainer(model, dataloader, LLaMAConfig())
 
 
