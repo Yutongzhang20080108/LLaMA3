@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
 import tiktoken
-import numpy as np
+import math
 import time
 #---------------------------------------------------------
 
@@ -20,9 +20,10 @@ class LLaMAConfig:
     mlp_ratio: float = 4
     batch_size: int = 4
     max_seq_len: int = 64
-    total_steps: int = 5000
+    total_steps: int = 500
     warmup_ratio: float = 0.1
-    peak_lr: float = 1e-4
+    peak_lr: float = 3e-4
+    min_lr: float = 3e-4 * 0.1
 
 #Part2: Tokenizer
 #We are going to use the tokenizer from Huggingface.
@@ -124,10 +125,13 @@ class LLaMA3(nn.Module):
         self.emb = nn.Embedding(config.n_vocab, config.n_embd)
         self.pos_emb = nn.Embedding(config.max_seq_len, config.n_embd)
         self.Decoder = nn.ModuleList([DecoderBlock(config) for _ in range(config.n_layer)])
-        self.ln = nn.Linear(config.n_embd, config.n_vocab)
+        self.lm_head = nn.Linear(config.n_embd, config.n_vocab, bias=False)
         self.loss_fn  = nn.CrossEntropyLoss()
         self.LayerNorm = nn.LayerNorm(config.n_embd)
-    
+
+        #we need to share the weights between the token embedding tabel and the lm_head
+        self.emb.weight = self.ln.weight
+
     #forward function is basically the training loop
     def forward(self, idx, target=None):
         model.train()
@@ -139,7 +143,7 @@ class LLaMA3(nn.Module):
         emb = token_emb + pos_emb
         for block in self.Decoder:
             emb = block(emb)
-        logits = self.ln(self.LayerNorm(emb))
+        logits = self.lm_head(self.LayerNorm(emb))
         if target is not None:
             loss = self.loss_fn(logits.view(-1, self.config.n_vocab), target.view(-1))
             return logits, loss
@@ -161,10 +165,12 @@ class LLaMA3(nn.Module):
                 emb = token_emb + pos_emb
                 for block in self.Decoder:
                     emb = block(emb)
-                logits = self.ln(self.LayerNorm(emb))
+                logits = self.lm_head(self.LayerNorm(emb))
                 logits = logits[-1, :]
                 next_tokens_probs = F.softmax(logits, dim=-1)
-                next_token = torch.multinomial(next_tokens_probs, 1)
+                topk_probs, topk_indices = torch.topk(next_tokens_probs, 50, dim=-1)
+                next_token_idx = torch.multinomial(topk_probs, 1)
+                next_token = torch.gather(input=topk_indices, dim=-1, index=next_token_idx)
                 tokenized_sentence = torch.cat([tokenized_sentence, next_token], dim=-1)
 
             generation = tokenizer.decode(tokenized_sentence.tolist())
@@ -177,7 +183,9 @@ class LLaMA3(nn.Module):
                 logits = self.forward(num_tokenized_sentence)
                 logits = logits[:, -1, :]
                 next_tokens_probs = F.softmax(logits, dim=-1)
-                next_token = torch.multinomial(next_tokens_probs, 1)
+                topk_probs, topk_indices = torch.topk(next_tokens_probs, 50, dim=-1)
+                next_token_idx = torch.multinomial(topk_probs, 1)
+                next_token = torch.gather(input=topk_indices, dim=-1, index=next_token_idx)
                 num_tokenized_sentence = torch.cat([num_tokenized_sentence, next_token], dim=-1)
             
             generation = [tokenizer.decode(num_tokenized_sentence[i].tolist()) for i in range(B)]
@@ -191,12 +199,18 @@ class lr:
         self.warmup_ratio = config.warmup_ratio
         self.peak_lr = config.peak_lr
         self.total_steps = config.total_steps
+        self.min_lr = config.min_lr
 
     def get_lr(self, step):
         if step < self.warmup_ratio * self.total_steps:
-            return self.peak_lr * step / (self.warmup_ratio * self.total_steps)
+            return self.peak_lr * (step+1) / (self.warmup_ratio * self.total_steps)
+        if step > self.warmup_ratio * self.total_steps:
+            return self.min_lr
         else:
-            return self.peak_lr * 0.5 * (1 + torch.cos((step - self.warmup_ratio * self.total_steps) * np.pi / (self.total_steps - self.warmup_ratio * self.total_steps)))
+            decay_ratio = (step - self.warmup_ratio * self.total_steps) / (self.total_steps - self.warmup_ratio * self.total_steps)
+            assert 0 <= decay_ratio <= 1
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            return self.min_lr + coeff * (self.peak_lr - self.min_lr)
             
 #You can call this function to pretrain the default language model
 def Pretrainer(model, dataloader, config):
@@ -230,11 +244,11 @@ model = LLaMA3(LLaMAConfig()).to(device)
 #logits, loss = model(x, y)
 #print(logits.shape, loss)
 
-"""#test sampling
+#test sampling
 source_sentence = "Hello world"
 generation = model.generation(source_sentence, 2)
-print(generation)"""
+print(generation)
 
-Pretrainer(model, dataloader, LLaMAConfig())
+#Pretrainer(model, dataloader, LLaMAConfig())
 
 
