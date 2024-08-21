@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
-from transformers import LLAMATokenizer
+from transformers import GPT2Tokenizer
 #---------------------------------------------------------
 
 #Part1: Config
@@ -14,14 +14,14 @@ class LLaMAConfig:
     n_embd: int = 1024
     n_head: int = 8
     n_layer:int = 8
-    n_vocab:int = 128000
+    n_vocab:int = 50257
     mlp_ratio: float = 4
     batch_size: int = 4
     max_seq_len: int = 512
 
 #Part2: Tokenizer
 #We are going to use the tokenizer from Huggingface.
-tokenizer = LLAMATokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
 #Part3: Model
 class SelfAttention(nn.Module):
@@ -69,9 +69,9 @@ class MLP(nn.Module):
 class DecoderBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.RMSnorm = nn.rms_norm(config.n_embd)
+        self.RMSnorm = nn.RMSNorm(config.n_embd)
         self.SelfAttention = SelfAttention(config.n_embd, config.n_head)
-        self.RMSnorm = nn.rms_norm(config.n_embd)
+        self.RMSnorm = nn.RMSNorm(config.n_embd)
         self.mlp = MLP(config.n_embd, config.mlp_ratio)
 
     def forward(self, x):
@@ -85,18 +85,18 @@ class LLaMA3(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.tokenizer = tokenizer
         self.pos_emb = nn.Embedding(config.max_seq_len, config.n_embd)
-        self.Decoder = nn.ModuleList([DecoderBlock for _ in range(config.n_layer)])
+        self.Decoder = nn.ModuleList([DecoderBlock(config) for _ in range(config.n_layer)])
         self.ln = nn.Linear(config.n_embd, config.n_vocab)
-        self.softmax = F.softmax(config.n_vocab, dim=-1)
     
     def forward(self, idx, target=None):
         super().__init__()
-        token_emb = tokenizer.encoder(idx)
+        token_emb = torch.tensor(tokenizer.encode(idx)).to(device)
         pos_emb = self.pos_emb(idx)
         emb = token_emb + pos_emb
         logits = self.Decoder(emb)
-        logits = self.softmax(self.ln(logits))
+        logits = F.softmax(self.ln(logits), dim=-1)
         return logits
     
 #---------------------------------------------------------
@@ -106,7 +106,7 @@ print(f"Device: {device}")
 
 with open("input.txt", "r") as f:
     data = f.read()
-idx = torch.tensor(data[:512]).to(device)
+test_data = data[:512]
 model = LLaMA3(LLaMAConfig()).to(device)
-logits = model(idx)
+logits = model(test_data)
 print(logits)
